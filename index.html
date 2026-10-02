@@ -915,12 +915,25 @@ button { font: inherit; color: inherit; }
 /* =====================================================================
    RÉGLAGES — la seule partie à modifier
    ---------------------------------------------------------------------
-   SHEET_CSV_URL : lien « Publier sur le web » de la Google Sheet, au
-   format CSV (Fichier › Partager › Publier sur le web › Feuille 1 › CSV).
+   SHEET_CSV_URL : lien de la Google Sheet. Au choix :
+     - le lien « Publier sur le web » (format CSV, ou même la page web) ;
+     - le lien de partage (…/edit), si la Sheet est partagée
+       « Tous les utilisateurs disposant du lien › Lecteur ».
    Laisser vide pour utiliser les données intégrées ci-dessous.
+   CHAMPS : true = affiché sur la fiche, false = masqué.
    ===================================================================== */
 const CONFIG = {
   SHEET_CSV_URL: "",
+  CHAMPS: {
+    partenaire: true,
+    objectif: true,
+    adresse: true,
+    offre: false,
+    zone: false,
+    telephone: false,
+    email: false,
+    horaires: false
+  },
   VUES: [
     { nom: "France", deps: null },
     { nom: "Île-de-France", deps: ["75", "77", "78", "91", "92", "93", "94", "95"] },
@@ -1479,13 +1492,34 @@ function findDep(lon, lat) {
 }
 
 /* ---------- Chargement ---------- */
+function sheetUrl(u) {
+  u = u.trim();
+  const id = u.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]{20,})/);
+  if (u.includes("/d/e/")) {
+    // lien « Publier sur le web » : on force le format CSV
+    const gid = u.match(/[?&#]gid=(\d+)/);
+    return u.split("?")[0].replace(/\/pubhtml$|\/pub$/, "/pub") + "?output=csv" + (gid ? "&gid=" + gid[1] : "") + "&single=true";
+  }
+  if (id) {
+    // lien de partage classique : export CSV via l'interface de visualisation
+    const gid = u.match(/[?&#]gid=(\d+)/);
+    return `https://docs.google.com/spreadsheets/d/${id[1]}/gviz/tq?tqx=out:csv${gid ? "&gid=" + gid[1] : ""}`;
+  }
+  return u;
+}
+
 async function loadData() {
   const fallback = () => DONNEES_INTEGREES.map(clean);
   if (!CONFIG.SHEET_CSV_URL) return { rows: fallback(), source: "Données intégrées à la page", ok: true };
+  let why = "Sheet injoignable";
   try {
-    const res = await fetch(CONFIG.SHEET_CSV_URL + (CONFIG.SHEET_CSV_URL.includes("?") ? "&" : "?") + "t=" + Date.now());
-    if (!res.ok) throw new Error(res.status);
-    const rows = parseCSV(await res.text()).map(clean).filter((a) => a.nom);
+    const url = sheetUrl(CONFIG.SHEET_CSV_URL);
+    const res = await fetch(url + (url.includes("?") ? "&" : "?") + "t=" + Date.now(), { cache: "no-store" });
+    if (!res.ok) { why = `Sheet refusée (erreur ${res.status}) : vérifiez la publication ou le partage`; throw new Error(res.status); }
+    const text = await res.text();
+    if (/^\s*</.test(text)) { why = "Le lien renvoie une page web, pas un tableau : vérifiez la publication ou le partage"; throw new Error("html"); }
+    const rows = parseCSV(text).map(clean).filter((a) => a.nom);
+    if (!rows.length) { why = "Sheet lue mais aucune agence trouvée : vérifiez la colonne « Agence »"; throw new Error("empty"); }
     const backup = Object.fromEntries(fallback().map((a) => [norm(a.nom), a]));
     for (const a of rows) {
       if (a.lat != null && a.lon != null) continue;
@@ -1497,7 +1531,8 @@ async function loadData() {
     const t = new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
     return { rows, source: `Google Sheet · chargée à ${t}`, ok: true };
   } catch (e) {
-    return { rows: fallback(), source: "Sheet injoignable · données intégrées affichées", ok: false };
+    console.warn("Carte Amicial :", why, e);
+    return { rows: fallback(), source: why + " · données intégrées affichées", ok: false };
   }
 }
 
@@ -1661,20 +1696,22 @@ function select(a) {
     : `<svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6" fill="none" stroke="#3E5A7F" stroke-width="2"/><circle cx="10" cy="10" r="2.4" fill="#3E5A7F"/></svg>`;
 
   const offre = a.offre ? a.offre.split(/\s*[;\n•]\s*/).filter(Boolean) : [];
+  const C = CONFIG.CHAMPS;
   const fields = [
-    a.partenaire ? ["Partenaire", esc(a.partenaire), "partner"] : null,
-    offre.length ? ["Offre de service", `<ul class="offre">${offre.map((o) => `<li>${esc(o)}</li>`).join("")}</ul>`] : null,
-    a.objectif ? ["Objectif", esc(a.objectif).replace(/\n/g, "<br>")] : null,
-    a.zone ? ["Zone d'intervention", esc(a.zone).replace(/\n/g, "<br>")] : null
+    C.partenaire && a.partenaire ? ["Partenaire", esc(a.partenaire), "partner"] : null,
+    C.offre && offre.length ? ["Offre de service", `<ul class="offre">${offre.map((o) => `<li>${esc(o)}</li>`).join("")}</ul>`] : null,
+    C.objectif && a.objectif ? ["Objectif", esc(a.objectif).replace(/\n/g, "<br>")] : null,
+    C.zone && a.zone ? ["Zone d'intervention", esc(a.zone).replace(/\n/g, "<br>")] : null
   ].filter(Boolean);
   const contact = [
-    a.tel ? `<div class="contact-line tel">${ICON_TEL}<a href="tel:${esc(a.tel.replace(/[^\d+]/g, ""))}">${esc(a.tel)}</a></div>` : "",
-    a.email ? `<div class="contact-line">${ICON_MAIL}<a href="mailto:${esc(a.email)}">${esc(a.email)}</a></div>` : "",
-    a.adresse ? `<div class="contact-line">${ICON_PIN}<span>${esc(a.adresse)}</span></div>` : ""
+    C.telephone && a.tel ? `<div class="contact-line tel">${ICON_TEL}<a href="tel:${esc(a.tel.replace(/[^\d+]/g, ""))}">${esc(a.tel)}</a></div>` : "",
+    C.email && a.email ? `<div class="contact-line">${ICON_MAIL}<a href="mailto:${esc(a.email)}">${esc(a.email)}</a></div>` : "",
+    C.adresse && a.adresse ? `<div class="contact-line">${ICON_PIN}<span>${esc(a.adresse)}</span></div>` : ""
   ].join("");
-  const practical = (contact || a.horaires) ? `<dl class="practical">
-      ${contact ? `<div class="field"><dt>Contact</dt><dd>${contact}</dd></div>` : ""}
-      ${a.horaires ? `<div class="field"><dt>Horaires d'accueil</dt><dd>${hoursHTML(a.horaires)}</dd></div>` : ""}
+  const showH = C.horaires && a.horaires;
+  const practical = (contact || showH) ? `<dl class="practical">
+      ${contact ? `<div class="field"><dt>${C.telephone || C.email ? "Contact" : "Adresse"}</dt><dd>${contact}</dd></div>` : ""}
+      ${showH ? `<div class="field"><dt>Horaires d'accueil</dt><dd>${hoursHTML(a.horaires)}</dd></div>` : ""}
     </dl>` : "";
 
   card.innerHTML = `
